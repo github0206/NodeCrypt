@@ -1,4 +1,119 @@
 import { generateClientId, encryptMessage, decryptMessage, logEvent, isString, isObject, getTime } from './utils.js';
+// 引入 bcrypt 库（需在项目中安装，如 `npm install bcryptjs`）
+import * as bcrypt from 'bcryptjs';
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // 1. 定义公开路径（登录页和登录接口）
+    const publicPaths = ['/', '/login.html', '/api/login'];
+    const isPublicPath = publicPaths.includes(url.pathname);
+
+    // 2. 非公开路径需要验证会话
+    if (!isPublicPath) {
+      const session = this.getSessionFromCookie(request.headers.get('Cookie'));
+      if (!session || !(await this.validateSession(session, env))) {
+        return this.redirectToLogin();
+      }
+    }
+
+    // 3. 处理登录请求
+    if (url.pathname === '/api/login' && request.method === 'POST') {
+      return this.handleLogin(request, env);
+    }
+
+    // 4. 处理 WebSocket 请求（需验证会话）
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader && upgradeHeader === 'websocket') {
+      const session = this.getSessionFromCookie(request.headers.get('Cookie'));
+      if (!session || !(await this.validateSession(session, env))) {
+        return new Response('未授权', { status: 401 });
+      }
+      const id = env.CHAT_ROOM.idFromName('chat-room');
+      const stub = env.CHAT_ROOM.get(id);
+      return stub.fetch(request);
+    }
+
+    // 5. 处理其他 API 请求和静态资源
+    if (url.pathname.startsWith('/api/')) {
+      return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+    }
+
+    return env.ASSETS.fetch(request);
+  },
+
+  // 从 Cookie 中提取会话
+  getSessionFromCookie(cookie) {
+    return cookie?.split('; ')
+      .find(c => c.startsWith('session='))?.split('=')[1];
+  },
+
+  // 验证会话有效性
+  async validateSession(session, env) {
+    // 从 KV 中验证会话（需提前在 Cloudflare 配置 KV 命名空间并绑定为 `SESSION_KV`）
+    const username = await env.SESSION_KV.get(session);
+    return username === env.VALID_USERNAME; // 验证会话对应的用户名是否匹配配置的用户名
+  },
+
+  // 重定向到登录页
+  redirectToLogin() {
+    return new Response(null, {
+      status: 302,
+      headers: { 'Location': '/login.html' }
+    });
+  },
+
+  // 处理登录逻辑
+  async handleLogin(request, env) {
+    const formData = await request.formData();
+    const username = formData.get('username');
+    const password = formData.get('password');
+
+    // 验证输入
+    if (!username || !password) {
+      return new Response('用户名和密码不能为空', { status: 400 });
+    }
+
+    // 验证用户名（从环境变量读取）
+    if (username !== env.VALID_USERNAME) {
+      return new Response('用户名或密码错误', { status: 401 });
+    }
+
+    // 验证密码（从机密读取哈希值）
+    const isPasswordValid = await bcrypt.compare(password, env.VALID_PASSWORD_HASH);
+    if (!isPasswordValid) {
+      return new Response('用户名或密码错误', { status: 401 });
+    }
+
+    // 生成会话令牌并存储到 KV（有效期 24 小时）
+    const sessionToken = this.generateSessionToken();
+    await env.SESSION_KV.put(sessionToken, username, { expirationTtl: 86400 });
+
+    // 设置 HttpOnly Cookie 并重定向到主页
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': '/',
+        'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/`
+      }
+    });
+  },
+
+  // 生成随机会话令牌
+  generateSessionToken() {
+    const array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    return Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
+  }
+};
+
+// 以下为原 ChatRoom 类（保持不变）
+export class ChatRoom {
+  // ... 原有代码 ...
+
+
+import { generateClientId, encryptMessage, decryptMessage, logEvent, isString, isObject, getTime } from './utils.js';
 
 export default {
   async fetch(request, env, ctx) {
@@ -477,3 +592,7 @@ export class ChatRoom {  constructor(state, env) {
     return clientsToRemove.length; // 返回清理的连接数量
   }
 }
+
+}
+
+
